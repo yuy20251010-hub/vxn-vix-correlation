@@ -218,56 +218,87 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
 
     # 实时拉取
     result = {}
-    all_dfs = {}
 
+    # ── Step 1: VXN 从 CBOE 获取 ──
+    vxn_sym = SYMBOLS.get("VXN", "^VXN")
+    df_vxn = pd.DataFrame()
+    try:
+        df_vxn = _fetch_cboe("VXN")
+    except Exception:
+        try:
+            df_vxn = _fetch_yfinance(vxn_sym, "max")
+        except Exception:
+            pass
+
+    if df_vxn.empty:
+        raise RuntimeError(f"无法获取 VXN ({vxn_sym}) 的数据，所有数据源均不可用")
+
+    result["VXN"] = {
+        "latest_close": float(df_vxn["Close"].iloc[-1]),
+        "latest_date": df_vxn.index[-1].strftime("%Y-%m-%d"),
+        "history": df_vxn,
+    }
+
+    # ── Step 2: IXIC, VIX, GSPC 从 yfinance 批量获取 ──
+    yf_symbols = []
+    yf_names = []
     for name, sym in SYMBOLS.items():
-        df = pd.DataFrame()
+        if name != "VXN":
+            yf_symbols.append(sym)
+            yf_names.append(name)
 
-        # VXN: CBOE 为主数据源（Yahoo Finance 已不支持 ^VXN）
-        if name == "VXN":
-            try:
-                df = _fetch_cboe(name)
-            except Exception as e:
-                # CBOE 也失败时尝试 yfinance（万一将来恢复）
+    # 批量请求，一次 HTTP 调用避免频率限制
+    yf_data = {}
+    try:
+        raw = yf.download(
+            tickers=" ".join(yf_symbols),
+            period="max",
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+        )
+        if raw is not None and not raw.empty:
+            for i, sym in enumerate(yf_symbols):
+                name = yf_names[i]
                 try:
-                    df = _fetch_yfinance(sym, "max")
+                    if ("Close", sym) in raw.columns:
+                        series = raw[("Close", sym)].dropna()
+                        df = pd.DataFrame({"Close": series})
+                        df.index.name = "Date"
+                        yf_data[name] = df
                 except Exception:
                     pass
+    except Exception:
+        pass
 
-        # VIX / GSPC: yfinance 为主，CBOE 作为备用
-        elif name in ("VIX", "GSPC"):
+    # 逐个补充失败的
+    for i, name in enumerate(yf_names):
+        if name in yf_data:
+            df = yf_data[name]
+        else:
+            sym = yf_symbols[i]
+            df = pd.DataFrame()
+            # 逐个重试
             try:
                 df = _fetch_yfinance(sym, "max")
             except Exception:
+                pass
+            # CBOE 备用
+            if df.empty and name in ("VIX", "GSPC"):
                 try:
                     df = _fetch_cboe(name)
                 except Exception:
                     pass
 
-        # IXIC: 只有 yfinance（CBOE 不提供纳斯达克数据）
-        else:
-            try:
-                df = _fetch_yfinance(sym, "max")
-            except Exception:
-                pass
-
-        # Alpha Vantage 作为最后备用
-        if df.empty and ALPHA_VANTAGE_API_KEY:
-            df = _fetch_alpha_vantage(sym)
-
         if df.empty:
-            raise RuntimeError(f"无法获取 {name} ({sym}) 的数据，所有数据源均不可用")
-
-        all_dfs[name] = df
-        latest_date = df.index[-1].strftime("%Y-%m-%d") if not df.empty else "N/A"
+            raise RuntimeError(f"无法获取 {name} ({yf_symbols[i]}) 的数据，所有数据源均不可用")
 
         result[name] = {
-            "latest_close": float(df["Close"].iloc[-1]) if not df.empty else None,
-            "latest_date": latest_date,
+            "latest_close": float(df["Close"].iloc[-1]),
+            "latest_date": df.index[-1].strftime("%Y-%m-%d"),
             "history": df,
         }
-        # 间隔 2 秒避免触发频率限制
-        time.sleep(2)
+        time.sleep(0.5)
 
     # 数据新鲜度
     latest_trading_day = _latest_trading_day()
