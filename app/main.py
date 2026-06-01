@@ -39,6 +39,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger(__name__)
 
 
+def _clean_nan(obj):
+    """递归清理 NaN/Inf 值，替换为 None"""
+    import math
+    if isinstance(obj, dict):
+        return {k: _clean_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_nan(v) for v in obj]
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+    return obj
+
+
 # ── 生命周期 ──
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -114,7 +127,7 @@ async def get_correlation(force_refresh: bool = Query(False)):
             "timestamp": datetime.now().isoformat(),
         }
 
-        return JSONResponse(result)
+        return JSONResponse(_clean_nan(result))
 
     except RuntimeError as e:
         return JSONResponse({
