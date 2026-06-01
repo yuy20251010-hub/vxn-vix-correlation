@@ -1,6 +1,6 @@
 """
 数据获取模块
-主数据源: yfinance (Yahoo Finance)
+主数据源: CBOE (VXN) / yfinance (VIX, SPX, Nasdaq)
 备用数据源: Alpha Vantage
 """
 import logging
@@ -91,6 +91,64 @@ def fetch_from_yfinance(tickers: list, period: str = "5y") -> Optional[pd.DataFr
         return None
 
 
+# ── CBOE 数据获取 (VXN 主数据源) ──
+
+CBOE_HISTORY_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices"
+
+_CBOE_FILE_MAP = {
+    "VXN": "VXN_History.csv",
+    "VIX": "VIX_History.csv",
+    "GSPC": "SPX_History.csv",
+}
+
+
+def fetch_from_cboe(name: str) -> Optional[pd.DataFrame]:
+    """
+    从 CBOE 官网获取历史数据。
+
+    CBOE CSV 格式:
+    - VXN/VIX: DATE, OPEN, HIGH, LOW, CLOSE
+    - SPX: DATE, SPX (only close)
+
+    Args:
+        name: "VXN", "VIX", 或 "GSPC"
+
+    Returns:
+        DataFrame with 'Close' column and Date index, 或 None
+    """
+    import io
+    import urllib.request
+
+    filename = _CBOE_FILE_MAP.get(name)
+    if not filename:
+        logger.warning(f"CBOE: no file mapping for {name}")
+        return None
+
+    try:
+        url = f"{CBOE_HISTORY_URL}/{filename}"
+        logger.info(f"Fetching from CBOE: {url}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+
+        if name == "GSPC":
+            # SPX: DATE,SPX
+            df = pd.read_csv(io.StringIO(raw), parse_dates=["DATE"], index_col="DATE")
+            df.rename(columns={"SPX": "Close"}, inplace=True)
+        else:
+            # VXN/VIX: DATE,OPEN,HIGH,LOW,CLOSE
+            df = pd.read_csv(io.StringIO(raw), parse_dates=["DATE"], index_col="DATE")
+            df = df[["CLOSE"]].rename(columns={"CLOSE": "Close"})
+
+        df = df.sort_index()
+        logger.info(f"CBOE {name}: got {len(df)} rows")
+        return df
+
+    except Exception as e:
+        logger.error(f"CBOE fetch error for {name}: {e}")
+        return None
+
+
 def fetch_from_alpha_vantage(ticker: str, api_key: str = "") -> Optional[pd.Series]:
     """
     从 Alpha Vantage 获取单个股票数据 (备用)
@@ -153,9 +211,10 @@ def fetch_all_data(
     获取所有四个指数的数据
 
     策略:
-    1. 优先使用 yfinance 批量拉取 (速度快, 一次请求)
-    2. 如果某个 ticker 在 yfinance 返回为空, 用 Alpha Vantage 补充
-    3. 增量拉取: 先检查已有缓存, 只拉取缺失的日期
+    1. VXN: 优先使用 CBOE（Yahoo Finance 已不支持 ^VXN）
+    2. VIX/GSPC: 优先使用 yfinance 批量拉取
+    3. IXIC: 使用 yfinance（CBOE 不提供纳斯达克数据）
+    4. 缺失的用 CBOE / Alpha Vantage 补充
 
     Returns:
         {ticker_name: DataFrame with 'Close' column}
@@ -165,33 +224,58 @@ def fetch_all_data(
 
     result = {}
 
-    # 确定拉取周期: 需要覆盖 5 年 (最长时间窗口)
-    raw = fetch_from_yfinance(tickers_list, period="5y")
+    # ── VXN: 从 CBOE 获取（主数据源）──
+    vxn_idx = ticker_names.index("VXN") if "VXN" in ticker_names else -1
+    if vxn_idx >= 0:
+        df_vxn = fetch_from_cboe("VXN")
+        if df_vxn is not None:
+            result["VXN"] = df_vxn
+            logger.info(f"  VXN (CBOE): {len(df_vxn)} days")
+        else:
+            logger.warning("  VXN: CBOE returned no data")
 
-    if raw is not None:
-        # yfinance 返回 MultiIndex columns: ('Close', '^VIX'), ('Close', '^GSPC')
-        for i, ticker_val in enumerate(tickers_list):
-            name = ticker_names[i]
-            try:
-                if ("Close", ticker_val) in raw.columns:
-                    series = raw[("Close", ticker_val)].dropna()
-                    df = pd.DataFrame({"Close": series})
-                    df.index.name = "Date"
-                    result[name] = df
-                    logger.info(f"  {name} ({ticker_val}): {len(df)} days")
-                else:
-                    logger.warning(f"  {name} ({ticker_val}): no Close column in yfinance output")
-            except Exception as e:
-                logger.error(f"  {name} ({ticker_val}): error extracting from yfinance: {e}")
+    # ── VIX/GSPC/IXIC: 从 yfinance 批量获取 ──
+    yf_tickers = [
+        tickers_list[i] for i in range(len(tickers_list))
+        if ticker_names[i] != "VXN"  # VXN 已经从 CBOE 获取
+    ]
+    yf_names = [n for n in ticker_names if n != "VXN"]
 
-    # Alpha Vantage 补充缺失的 ticker
+    if yf_tickers:
+        raw = fetch_from_yfinance(yf_tickers, period="5y")
+
+        if raw is not None:
+            for i, ticker_val in enumerate(yf_tickers):
+                name = yf_names[i]
+                try:
+                    if ("Close", ticker_val) in raw.columns:
+                        series = raw[("Close", ticker_val)].dropna()
+                        df = pd.DataFrame({"Close": series})
+                        df.index.name = "Date"
+                        result[name] = df
+                        logger.info(f"  {name} ({ticker_val}): {len(df)} days")
+                    else:
+                        logger.warning(f"  {name} ({ticker_val}): no Close column in yfinance output")
+                except Exception as e:
+                    logger.error(f"  {name} ({ticker_val}): error extracting from yfinance: {e}")
+
+    # ── 补充缺失: CBOE (VIX/GSPC) 或 Alpha Vantage ──
     for i, name in enumerate(ticker_names):
-        if name not in result and config.ALPHA_VANTAGE_API_KEY:
+        if name not in result:
             ticker_val = tickers_list[i]
-            series = fetch_from_alpha_vantage(ticker_val, config.ALPHA_VANTAGE_API_KEY)
-            if series is not None:
-                result[name] = pd.DataFrame({"Close": series})
-                result[name].index.name = "Date"
+
+            # 尝试 CBOE
+            df_cboe = fetch_from_cboe(name)
+            if df_cboe is not None:
+                result[name] = df_cboe
+                continue
+
+            # 尝试 Alpha Vantage
+            if config.ALPHA_VANTAGE_API_KEY:
+                series = fetch_from_alpha_vantage(ticker_val, config.ALPHA_VANTAGE_API_KEY)
+                if series is not None:
+                    result[name] = pd.DataFrame({"Close": series})
+                    result[name].index.name = "Date"
 
     return result
 

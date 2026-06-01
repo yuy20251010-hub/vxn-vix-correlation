@@ -81,6 +81,68 @@ def _fetch_yfinance(symbol: str, period: str, retries: int = 3) -> pd.DataFrame:
             break
     raise RuntimeError(f"获取 {symbol} 失败: {last_error}")
 
+# ── CBOE 数据获取（VXN 主数据源，VIX/SPX 备用）──
+CBOE_URL = "https://cdn.cboe.com/api/global/us_indices/daily_prices"
+
+# CBOE 文件名映射
+_CBOE_FILE_MAP = {
+    "VXN": "VXN_History.csv",
+    "VIX": "VIX_History.csv",
+    "GSPC": "SPX_History.csv",
+}
+
+# CBOE CSV 列名映射: (close_column_name, has_ohlc)
+_CBOE_FORMAT_MAP = {
+    "VXN": ("CLOSE", True),   # DATE, OPEN, HIGH, LOW, CLOSE
+    "VIX": ("CLOSE", True),   # DATE, OPEN, HIGH, LOW, CLOSE
+    "GSPC": ("SPX", False),   # DATE, SPX (only close)
+}
+
+
+def _fetch_cboe(name: str, max_rows: int = None) -> pd.DataFrame:
+    """从 CBOE 官网拉取历史数据。
+
+    CBOE 提供 VXN/VIX/SPX 的完整历史 CSV。
+    格式: DATE, OPEN, HIGH, LOW, CLOSE (VXN/VIX) 或 DATE, SPX (GSPC)
+
+    Args:
+        name: "VXN", "VIX", 或 "GSPC"
+        max_rows: 保留最近 N 行（None = 全部）
+    """
+    import io
+
+    filename = _CBOE_FILE_MAP.get(name)
+    if not filename:
+        return pd.DataFrame()
+
+    try:
+        import urllib.request
+        url = f"{CBOE_URL}/{filename}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+
+        # 解析 CSV
+        if name == "GSPC":
+            # SPX: DATE,SPX
+            df = pd.read_csv(io.StringIO(raw), parse_dates=["DATE"], index_col="DATE")
+            df.rename(columns={"SPX": "Close"}, inplace=True)
+        else:
+            # VXN/VIX: DATE,OPEN,HIGH,LOW,CLOSE
+            df = pd.read_csv(io.StringIO(raw), parse_dates=["DATE"], index_col="DATE")
+            # 只保留 Close
+            df = df[["CLOSE"]].rename(columns={"CLOSE": "Close"})
+
+        df = df.sort_index()
+        if max_rows:
+            df = df.iloc[-max_rows:]
+
+        return df
+
+    except Exception as e:
+        raise RuntimeError(f"CBOE 获取 {name} 失败: {e}")
+
+
 def _fetch_alpha_vantage(symbol: str, compact: bool = True) -> pd.DataFrame:
     """从 Alpha Vantage 拉取数据（备用）"""
     import httpx
@@ -159,11 +221,42 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
     all_dfs = {}
 
     for name, sym in SYMBOLS.items():
-        df = _fetch_yfinance(sym, "max")
+        df = pd.DataFrame()
+
+        # VXN: CBOE 为主数据源（Yahoo Finance 已不支持 ^VXN）
+        if name == "VXN":
+            try:
+                df = _fetch_cboe(name)
+            except Exception as e:
+                # CBOE 也失败时尝试 yfinance（万一将来恢复）
+                try:
+                    df = _fetch_yfinance(sym, "max")
+                except Exception:
+                    pass
+
+        # VIX / GSPC: yfinance 为主，CBOE 作为备用
+        elif name in ("VIX", "GSPC"):
+            try:
+                df = _fetch_yfinance(sym, "max")
+            except Exception:
+                try:
+                    df = _fetch_cboe(name)
+                except Exception:
+                    pass
+
+        # IXIC: 只有 yfinance（CBOE 不提供纳斯达克数据）
+        else:
+            try:
+                df = _fetch_yfinance(sym, "max")
+            except Exception:
+                pass
+
+        # Alpha Vantage 作为最后备用
         if df.empty and ALPHA_VANTAGE_API_KEY:
             df = _fetch_alpha_vantage(sym)
+
         if df.empty:
-            raise RuntimeError(f"无法获取 {name} ({sym}) 的数据，数据源可能不可用")
+            raise RuntimeError(f"无法获取 {name} ({sym}) 的数据，所有数据源均不可用")
 
         all_dfs[name] = df
         latest_date = df.index[-1].strftime("%Y-%m-%d") if not df.empty else "N/A"
@@ -173,8 +266,7 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
             "latest_date": latest_date,
             "history": df,
         }
-        # 间隔 2 秒避免触发 Yahoo Finance 频率限制
-        import time
+        # 间隔 2 秒避免触发频率限制
         time.sleep(2)
 
     # 数据新鲜度
