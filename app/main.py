@@ -60,7 +60,7 @@ app = FastAPI(
 
 @app.get("/")
 async def root():
-    return {"service": "VXN/VIX Correlation Analysis", "status": "running"}
+    return {"service": "VXN/VIX Correlation Analysis", "status": "running", "version": "2.0.0", "vxn_source": "CBOE"}
 
 
 @app.get("/health")
