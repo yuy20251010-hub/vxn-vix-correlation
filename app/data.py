@@ -272,6 +272,10 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
         pass
 
     # 逐个补充失败的
+    import logging
+    _log = logging.getLogger(__name__)
+    
+    data_warnings = []
     for i, name in enumerate(yf_names):
         if name in yf_data:
             df = yf_data[name]
@@ -291,7 +295,9 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
                     pass
 
         if df.empty:
-            raise RuntimeError(f"无法获取 {name} ({yf_symbols[i]}) 的数据，所有数据源均不可用")
+            _log.warning(f"无法获取 {name} ({yf_symbols[i]})，跳过")
+            data_warnings.append(f"{name} 数据不可用")
+            continue  # 跳过此 symbol，不阻塞其他数据
 
         result[name] = {
             "latest_close": float(df["Close"].iloc[-1]),
@@ -309,6 +315,8 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
         datetime.now().strftime("%Y-%m-%d") == latest_trading_day
     )
     result["data_fresh"] = data_latest >= _latest_trading_day()
+    if data_warnings:
+        result["warnings"] = data_warnings
 
     # 写入缓存
     cache_data = {}
