@@ -235,7 +235,7 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
 
     result["VXN"] = {
         "latest_close": float(df_vxn["Close"].iloc[-1]),
-        "latest_date": df_vxn.index[-1].strftime("%Y-%m-%d"),
+        "latest_date": pd.Timestamp(df_vxn.index[-1]).strftime("%Y-%m-%d"),
         "history": df_vxn,
     }
 
@@ -301,7 +301,7 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
 
         result[name] = {
             "latest_close": float(df["Close"].iloc[-1]),
-            "latest_date": df.index[-1].strftime("%Y-%m-%d"),
+            "latest_date": pd.Timestamp(df.index[-1]).strftime("%Y-%m-%d"),
             "history": df,
         }
         time.sleep(0.5)
@@ -362,7 +362,7 @@ def get_recent_table(data: dict, days: int = 10) -> pd.DataFrame:
         if name in data:
             df = data[name]["history"]
             if not df.empty:
-                all_dates.update(df.index.strftime("%Y-%m-%d"))
+                all_dates.update(pd.to_datetime(df.index).strftime("%Y-%m-%d"))
 
     sorted_dates = sorted(all_dates, reverse=True)[:days]
 
