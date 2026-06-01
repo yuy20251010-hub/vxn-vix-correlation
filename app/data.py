@@ -320,7 +320,9 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
 
     # 写入缓存
     cache_data = {}
-    for name in SYMBOLS:
+    for name in list(result.keys()):
+        if name in ("last_update", "is_trading_day", "data_fresh", "warnings"):
+            continue
         df = result[name]["history"]
         hist_records = df.reset_index().to_dict(orient="records") if not df.empty else []
         cache_data[name] = {
