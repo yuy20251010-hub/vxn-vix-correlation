@@ -169,8 +169,53 @@ def _fetch_alpha_vantage(symbol: str, compact: bool = True) -> pd.DataFrame:
         df = df.set_index("Date").sort_index()
     return df
 
-# ── FRED 数据获取（纳斯达克综合指数备用）──
-FRED_NASDAQ_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
+# ── Yahoo Finance v8 Chart API（IXIC 主备用数据源）──
+YAHOO_V8_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
+
+
+def _fetch_yahoo_v8(symbol: str, range_str: str = "2y") -> pd.DataFrame:
+    """通过 Yahoo Finance v8 Chart API 获取历史数据。
+
+    免费、无需 API Key、无需 cookie。Railway 美国服务器可直接访问。
+    返回包含 Date (index) 和 Close 列的 DataFrame。
+
+    Args:
+        symbol: 例如 "^IXIC"
+        range_str: 时间范围 (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, max)
+    """
+    import io
+    import urllib.request
+
+    try:
+        url = f"{YAHOO_V8_URL}/{urllib.request.quote(symbol, safe='')}?range={range_str}&interval=1d"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+
+        result = data["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quotes = result["indicators"]["quote"][0]
+        closes = quotes["close"]
+
+        # Build DataFrame
+        records = []
+        for ts, close in zip(timestamps, closes):
+            if close is not None:
+                records.append({
+                    "Date": pd.Timestamp(ts, unit="s").strftime("%Y-%m-%d"),
+                    "Close": float(close),
+                })
+
+        if not records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records)
+        df["Date"] = pd.to_datetime(df["Date"])
+        df = df.set_index("Date").sort_index()
+        return df
+
+    except Exception as e:
+        raise RuntimeError(f"Yahoo v8 获取 {symbol} 失败: {e}")
 
 
 def _fetch_fred_nasdaq() -> pd.DataFrame:
@@ -182,6 +227,7 @@ def _fetch_fred_nasdaq() -> pd.DataFrame:
     import io
     import urllib.request
 
+    FRED_NASDAQ_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
     try:
         req = urllib.request.Request(
             FRED_NASDAQ_URL,
@@ -328,7 +374,13 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
                     df = _fetch_cboe(name)
                 except Exception:
                     pass
-            # FRED 备用（IXIC / 纳斯达克综合指数）
+            # Yahoo v8 API 备用（IXIC 首选备用，已验证 Railway 可用）
+            if df.empty and name == "IXIC":
+                try:
+                    df = _fetch_yahoo_v8(sym, "max")
+                except Exception:
+                    pass
+            # FRED 备用（IXIC 第二备用）
             if df.empty and name == "IXIC":
                 try:
                     df = _fetch_fred_nasdaq()
