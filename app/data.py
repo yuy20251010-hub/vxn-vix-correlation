@@ -169,6 +169,41 @@ def _fetch_alpha_vantage(symbol: str, compact: bool = True) -> pd.DataFrame:
         df = df.set_index("Date").sort_index()
     return df
 
+# ── FRED 数据获取（纳斯达克综合指数备用）──
+FRED_NASDAQ_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
+
+
+def _fetch_fred_nasdaq() -> pd.DataFrame:
+    """从 FRED (美联储经济数据库) 获取纳斯达克综合指数历史数据。
+
+    FRED 数据免费、无需 API Key，Railway 美国服务器可直接访问。
+    CSV 格式: observation_date,NASDAQCOM
+    """
+    import io
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            FRED_NASDAQ_URL,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+
+        df = pd.read_csv(
+            io.StringIO(raw),
+            parse_dates=["observation_date"],
+            index_col="observation_date",
+        )
+        df.rename(columns={"NASDAQCOM": "Close"}, inplace=True)
+        df = df.sort_index()
+        df.index.name = "Date"
+        return df
+
+    except Exception as e:
+        raise RuntimeError(f"FRED 获取 NASDAQCOM 失败: {e}")
+
+
 # ── 主数据获取函数 ──
 def fetch_all_data(force_refresh: bool = False) -> dict:
     """
@@ -291,6 +326,12 @@ def fetch_all_data(force_refresh: bool = False) -> dict:
             if df.empty and name in ("VIX", "GSPC"):
                 try:
                     df = _fetch_cboe(name)
+                except Exception:
+                    pass
+            # FRED 备用（IXIC / 纳斯达克综合指数）
+            if df.empty and name == "IXIC":
+                try:
+                    df = _fetch_fred_nasdaq()
                 except Exception:
                     pass
 
