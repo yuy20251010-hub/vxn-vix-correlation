@@ -81,6 +81,84 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 
+@app.get("/test-ixic")
+async def test_ixic_sources():
+    """测试各种 IXIC 数据源（从 Railway 服务器环境）"""
+    import urllib.request, io as _io, time as _time
+    import pandas as _pd
+    
+    results = {}
+    
+    # Test 1: Yahoo Finance v7 CSV download
+    _t0 = _time.time()
+    try:
+        url = "https://query1.finance.yahoo.com/v7/finance/download/%5EIXIC?period1=1746144000&period2=1780387200&interval=1d&events=history"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode()
+        df = _pd.read_csv(_io.StringIO(raw))
+        results["yahoo_csv"] = {
+            "status": "ok",
+            "rows": len(df),
+            "last_close": float(df["Close"].iloc[-1]),
+            "last_date": str(df["Date"].iloc[-1]),
+            "time": round(_time.time() - _t0, 2)
+        }
+    except Exception as e:
+        results["yahoo_csv"] = {"status": "fail", "error": str(e), "time": round(_time.time() - _t0, 2)}
+    
+    # Test 2: FRED
+    _t0 = _time.time()
+    try:
+        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQCOM"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode()
+        df = _pd.read_csv(_io.StringIO(raw))
+        results["fred"] = {
+            "status": "ok",
+            "rows": len(df),
+            "last": str(df.iloc[-1].to_dict()),
+            "time": round(_time.time() - _t0, 2)
+        }
+    except Exception as e:
+        results["fred"] = {"status": "fail", "error": str(e), "time": round(_time.time() - _t0, 2)}
+    
+    # Test 3: Yahoo v8 chart API
+    _t0 = _time.time()
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EIXIC?range=5d&interval=1d"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        r = data["chart"]["result"][0]
+        results["yahoo_v8"] = {
+            "status": "ok",
+            "price": r["meta"]["regularMarketPrice"],
+            "time": round(_time.time() - _t0, 2)
+        }
+    except Exception as e:
+        results["yahoo_v8"] = {"status": "fail", "error": str(e), "time": round(_time.time() - _t0, 2)}
+    
+    # Test 4: CNBC quote
+    _t0 = _time.time()
+    try:
+        url = "https://www.cnbc.com/quotes/.IXIC"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode()
+        import re
+        match = re.search(r'"last":"([^"]+)"', html)
+        if match:
+            results["cnbc"] = {"status": "ok", "last": match.group(1), "time": round(_time.time() - _t0, 2)}
+        else:
+            results["cnbc"] = {"status": "fail", "error": "no match", "time": round(_time.time() - _t0, 2)}
+    except Exception as e:
+        results["cnbc"] = {"status": "fail", "error": str(e), "time": round(_time.time() - _t0, 2)}
+    
+    return results
+
+
 @app.get("/correlation")
 async def get_correlation(force_refresh: bool = Query(False)):
     """
